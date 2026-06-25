@@ -202,3 +202,13 @@ class GiftResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class ChatMessage(BaseModel):
+    sender: str  # "user" or "bot"
+    text: str
+
+class ChatQuery(BaseModel):
+    message: str
+    history: List[ChatMessage] = []
+    photo_url: Optional[str] = None
+    plant_card_id: Optional[int] = None

@@ -3,6 +3,7 @@ import 'package:greennest/services/api_service.dart';
 import 'package:greennest/models/plant_card.dart';
 import 'package:greennest/screens/plant_card_detail_screen.dart';
 import 'package:greennest/widgets/custom_button.dart';
+import 'package:image_picker/image_picker.dart';
 
 class PlantCardsScreen extends StatefulWidget {
   const PlantCardsScreen({Key? key}) : super(key: key);
@@ -43,58 +44,132 @@ class _PlantCardsScreenState extends State<PlantCardsScreen> {
     final speciesController = TextEditingController();
     String? location = 'Living Room';
     String? light = 'Medium';
+    String? photoUrl;
+    bool isUploading = false;
 
     showDialog(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('Add Plant to Garden'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nicknameController,
-                decoration: const InputDecoration(labelText: 'Nickname (e.g. Sunny)'),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: speciesController,
-                decoration: const InputDecoration(labelText: 'Species (e.g. Snake Plant)'),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () async {
-                if (nicknameController.text.isEmpty || speciesController.text.isEmpty) return;
-                try {
-                  await _apiService.createPlantCard(1, {
-                    'nickname': nicknameController.text,
-                    'species': speciesController.text,
-                    'location': location,
-                    'light_exposure': light,
-                    'water_frequency': 'Every 7 days',
-                    'fertilize_frequency': 'Monthly',
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> pickPhoto() async {
+              final picker = ImagePicker();
+              try {
+                final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+                if (image != null) {
+                  setDialogState(() => isUploading = true);
+                  final bytes = await image.readAsBytes();
+                  final url = await _apiService.uploadImage(bytes, image.name);
+                  setDialogState(() {
+                    photoUrl = url;
+                    isUploading = false;
                   });
-                  Navigator.pop(context);
-                  _loadPlantCards();
-                } catch (e) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Failed to add plant: $e')),
-                  );
                 }
-              },
-              child: const Text('Add'),
-            )
-          ],
+              } catch (e) {
+                setDialogState(() => isUploading = false);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Failed to upload image: $e')),
+                );
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Add Plant to Garden'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nicknameController,
+                    decoration: const InputDecoration(labelText: 'Nickname (e.g. Sunny)'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: speciesController,
+                    decoration: const InputDecoration(labelText: 'Species (e.g. Snake Plant)'),
+                  ),
+                  const SizedBox(height: 16),
+                  if (photoUrl != null)
+                    Container(
+                      height: 120,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(8),
+                        image: DecorationImage(
+                          image: NetworkImage(photoUrl!),
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                    )
+                  else if (isUploading)
+                    Container(
+                      height: 120,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Center(child: CircularProgressIndicator()),
+                    )
+                  else
+                    GestureDetector(
+                      onTap: pickPhoto,
+                      child: Container(
+                        height: 120,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[100],
+                          border: Border.all(color: Colors.grey[300]!),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.add_a_photo, color: Colors.grey[600]),
+                            const SizedBox(height: 4),
+                            Text('Upload Plant Photo', style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    if (nicknameController.text.isEmpty || speciesController.text.isEmpty) return;
+                    try {
+                      await _apiService.createPlantCard(1, {
+                        'nickname': nicknameController.text,
+                        'species': speciesController.text,
+                        'location': location,
+                        'light_exposure': light,
+                        'water_frequency': 'Every 7 days',
+                        'fertilize_frequency': 'Monthly',
+                        'photo_url': photoUrl,
+                      });
+                      Navigator.pop(context);
+                      _loadPlantCards();
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Failed to add plant: $e')),
+                      );
+                    }
+                  },
+                  child: const Text('Add'),
+                )
+              ],
+            );
+          },
         );
       },
     );
   }
+
 
   @override
   Widget build(BuildContext context) {

@@ -81,6 +81,36 @@ class ApiService {
     }
   }
 
+  // Request plant disease diagnosis via chat bot conversational flow
+  Future<Map<String, dynamic>> diagnosePlantChat({
+    required String message,
+    required List<Map<String, String>> history,
+    String? photoUrl,
+    int? plantCardId,
+  }) async {
+    final payload = {
+      'message': message,
+      'history': history,
+      'photo_url': photoUrl,
+      'plant_card_id': plantCardId,
+    };
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/diagnosis/chat'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(payload),
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      try {
+        final error = jsonDecode(response.body);
+        throw Exception(error['detail'] ?? 'Diagnosis failed');
+      } catch (_) {
+        throw Exception('Diagnosis failed: ${response.statusCode}');
+      }
+    }
+  }
+
   // Fetch saved plant cards for digital journal
   Future<List<PlantCard>> fetchUserPlantCards(int userId) async {
     final response = await http.get(Uri.parse('$baseUrl/api/users/$userId/plantcards'));

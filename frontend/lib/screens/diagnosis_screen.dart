@@ -14,10 +14,59 @@ class DiagnosisScreen extends StatefulWidget {
 
 class _DiagnosisScreenState extends State<DiagnosisScreen> {
   final ApiService _apiService = ApiService();
-  int _currentStep = 0; // 0: Select Saved or Unsaved, 1: Select PlantCard (Saved Flow), 2: Optional Context (New Flow), 3: Choose Symptoms & Photo, 4: Results
-  bool _isLoading = false;
+  final List<Map<String, dynamic>> _messages = [];
+  
+  final TextEditingController _chatInputController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  
+  bool _isLoadingBotResponse = false;
   bool _isUploadingPhoto = false;
+  
   String? _uploadedPhotoUrl;
+  List<PlantCard> _userCards = [];
+  PlantCard? _selectedCard; // Context plant card selected at the top
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserPlantCards();
+    
+    // Add initial bot greeting
+    _messages.add({
+      'sender': 'bot',
+      'text': "Hello! I am your GreenNest Plant Health Assistant. 🌿\n\nPlease describe any symptoms you see (e.g. 'leaves are yellowing', 'stems feel mushy'), ask questions, or attach a photo of your plant, and I will help you diagnose it!",
+    });
+  }
+
+  @override
+  void dispose() {
+    _chatInputController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadUserPlantCards() async {
+    try {
+      final cards = await _apiService.fetchUserPlantCards(1);
+      setState(() {
+        _userCards = cards;
+      });
+    } catch (e) {
+      // Fail silently
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
 
   Future<void> _pickAndUploadPhoto() async {
     final picker = ImagePicker();
@@ -29,18 +78,17 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
         final url = await _apiService.uploadImage(bytes, image.name);
         setState(() {
           _uploadedPhotoUrl = url;
-          _photoAttached = true;
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Photo uploaded successfully!')),
+            const SnackBar(content: Text('Symptom photo attached successfully!')),
           );
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to upload photo: $e')),
+          SnackBar(content: Text('Failed to attach photo: $e')),
         );
       }
     } finally {
@@ -50,539 +98,159 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
     }
   }
 
-  // Options variables
-  bool _isSavedPlant = false;
-  List<PlantCard> _userCards = [];
-  PlantCard? _selectedCard;
-
-  // Context variables for Unsaved Plant
-  String? _location;
-  String? _light;
-  String? _waterFrequency;
-
-  // Symptoms Selection variables
-  final List<String> _symptomsList = [
-    'yellow leaves', 'soft stem', 'mushy soil', 'dry crispy leaves', 
-    'drooping', 'leggy growth', 'pale new leaves', 'spots on leaves'
-  ];
-  final List<String> _selectedSymptoms = [];
-  bool _photoAttached = false;
-
-  // Results variables
-  Map<String, dynamic>? _diagnosisResult;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadUserPlantCards();
-  }
-
-  Future<void> _loadUserPlantCards() async {
-    try {
-      final cards = await _apiService.fetchUserPlantCards(1);
-      setState(() {
-        _userCards = cards;
-      });
-    } catch (e) {
-      // Slient fail or mock
-    }
-  }
-
-  Future<void> _runDiagnosis() async {
-    if (_selectedSymptoms.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select at least one plant symptom.')),
-      );
-      return;
-    }
-
-    setState(() => _isLoading = true);
-
-    try {
-      final result = await _apiService.diagnosePlant(
-        symptoms: _selectedSymptoms,
-        location: _isSavedPlant ? null : _location,
-        light: _isSavedPlant ? null : _light,
-        waterFrequency: _isSavedPlant ? null : _waterFrequency,
-        plantCardId: _isSavedPlant ? _selectedCard?.plantCardId : null,
-      );
-
-      setState(() {
-        _diagnosisResult = result;
-        _isLoading = false;
-        _currentStep = 4; // Display results
-      });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to complete diagnosis: $e')),
-      );
-    }
-  }
-
-  void _reset() {
+  Future<void> _sendMessage() async {
+    final text = _chatInputController.text.trim();
+    final photoUrl = _uploadedPhotoUrl;
+    
+    if (text.isEmpty && photoUrl == null) return;
+    
+    // Add user message to screen
     setState(() {
-      _currentStep = 0;
-      _isSavedPlant = false;
-      _selectedCard = null;
-      _location = null;
-      _light = null;
-      _waterFrequency = null;
-      _selectedSymptoms.clear();
-      _photoAttached = false;
-      _diagnosisResult = null;
+      _messages.add({
+        'sender': 'user',
+        'text': text.isNotEmpty ? text : 'Shared a symptom photo.',
+        'photoUrl': photoUrl,
+      });
+      _chatInputController.clear();
+      _uploadedPhotoUrl = null;
+      _isLoadingBotResponse = true;
     });
+    
+    _scrollToBottom();
+    
+    try {
+      // Map conversation history
+      final history = _messages.map((m) => {
+        'sender': m['sender'] as String,
+        'text': m['text'] as String,
+      }).toList();
+      
+      final response = await _apiService.diagnosePlantChat(
+        message: text,
+        history: history,
+        photoUrl: photoUrl,
+        plantCardId: _selectedCard?.plantCardId,
+      );
+      
+      setState(() {
+        _messages.add({
+          'sender': 'bot',
+          'text': response['response'],
+          'diagnosis': response['diagnosis'],
+          'photoUrl': photoUrl, // Keep reference to save log
+        });
+        _isLoadingBotResponse = false;
+      });
+    } catch (e) {
+      setState(() {
+        _messages.add({
+          'sender': 'bot',
+          'text': "Sorry, I had trouble analyzing that. Error details: $e",
+        });
+        _isLoadingBotResponse = false;
+      });
+    }
+    
+    _scrollToBottom();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final primaryColor = const Color(0xFF0F5132);
-
-    return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0.5,
-        iconTheme: const IconThemeData(color: Color(0xFF2D3748)),
-        title: const Text(
-          'Plant Health Assistant',
-          style: TextStyle(color: Color(0xFF2D3748), fontWeight: FontWeight.bold),
-        ),
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : Padding(
-              padding: const EdgeInsets.all(20.0),
-              child: SingleChildScrollView(child: _buildDiagnosticContent(primaryColor)),
+  void _showSaveOptionDialog(String diagnosis, String? photoUrl) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Save Health Diagnosis'),
+          content: const Text('Would you like to log this diagnosis to an existing plant or register a new PlantCard?'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _showSelectCardDialog(diagnosis, photoUrl);
+              },
+              child: const Text('Existing Plant'),
             ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _showCreateCardDialog(context, diagnosis, photoUrl);
+              },
+              child: const Text('New PlantCard'),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  Widget _buildDiagnosticContent(Color primaryColor) {
-    // --- Step 0: Choose Flow ---
-    if (_currentStep == 0) {
-      return Center(
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24)),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.monitor_heart, color: primaryColor, size: 64),
-              const SizedBox(height: 16),
-              const Text(
-                'Is this plant already saved in your GreenNest PlantCard list?',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: CustomButton(
-                  text: 'Yes, select from my plants',
-                  onTap: () {
-                    if (_userCards.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('You have no saved plants. Let\'s treat this as a new plant instead.')),
-                      );
-                      setState(() {
-                        _isSavedPlant = false;
-                        _currentStep = 2; // skip to unsaved context
-                      });
-                    } else {
-                      setState(() {
-                        _isSavedPlant = true;
-                        _currentStep = 1;
-                      });
-                    }
-                  },
-                ),
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: CustomButton(
-                  text: 'No, this is a new/unsaved plant',
-                  isPrimary: false,
-                  onTap: () {
-                    setState(() {
-                      _isSavedPlant = false;
-                      _currentStep = 2;
-                    });
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // --- Step 1: Select PlantCard (Saved Flow) ---
-    if (_currentStep == 1) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Select the plant you want to diagnose:',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-          ),
-          const SizedBox(height: 16),
-          ListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: _userCards.length,
-            itemBuilder: (context, index) {
-              final card = _userCards[index];
-              return Card(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                margin: const EdgeInsets.only(bottom: 12),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  leading: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.network(
-                      card.photoUrl ?? 'https://images.unsplash.com/photo-1596547609652-9cf5d8d76921',
-                      width: 50,
-                      height: 50,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  title: Text(card.nickname, style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(card.species),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    setState(() {
-                      _selectedCard = card;
-                      _currentStep = 3; // jump to symptoms & photo
-                    });
-                  },
-                ),
-              );
-            },
-          ),
-        ],
-      );
-    }
-
-    // --- Step 2: Unsaved Plant Context (Optional) ---
-    if (_currentStep == 2) {
-      return Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Help us understand where you keep this plant (Optional context)',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-            ),
-            const SizedBox(height: 20),
-            DropdownButtonFormField<String>(
-              decoration: const InputDecoration(labelText: 'Where is it kept?'),
-              items: ['Bedroom', 'Living Room', 'Balcony', 'Office Desk', 'Kitchen', 'Terrace']
-                  .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-              onChanged: (val) => _location = val,
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              decoration: const InputDecoration(labelText: 'How much light does it get?'),
-              items: ['Low', 'Medium', 'Bright Indirect', 'Direct Sunlight']
-                  .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-              onChanged: (val) => _light = val,
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              decoration: const InputDecoration(labelText: 'How often do you water it?'),
-              items: ['Daily', 'Every few days', 'Weekly', 'Rarely', 'Not sure']
-                  .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-              onChanged: (val) => _waterFrequency = val,
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              child: CustomButton(
-                text: 'Next: Select Symptoms',
-                onTap: () => setState(() => _currentStep = 3),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // --- Step 3: Choose Symptoms & Photo ---
-    if (_currentStep == 3) {
-      return Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Select visible symptoms:',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: _symptomsList.map((sym) {
-                final isSelected = _selectedSymptoms.contains(sym);
-                return FilterChip(
-                  label: Text(sym),
-                  selected: isSelected,
-                  selectedColor: primaryColor.withOpacity(0.2),
-                  checkmarkColor: primaryColor,
-                  onSelected: (val) {
-                    setState(() {
-                      if (val) {
-                        _selectedSymptoms.add(sym);
-                      } else {
-                        _selectedSymptoms.remove(sym);
-                      }
-                    });
-                  },
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Upload photo of symptoms:',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-            ),
-            const SizedBox(height: 12),
-            GestureDetector(
-              onTap: _isUploadingPhoto ? null : _pickAndUploadPhoto,
-              child: Container(
-                height: 140,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.grey.withOpacity(0.3)),
-                ),
-                child: _isUploadingPhoto
-                    ? Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: const [
-                          CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0F5132))),
-                          SizedBox(height: 12),
-                          Text('Uploading photo to GreenNest...', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                        ],
-                      )
-                    : _photoAttached && _uploadedPhotoUrl != null
-                        ? Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              Positioned.fill(
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(16),
-                                  child: Image.network(
-                                    _uploadedPhotoUrl!,
-                                    fit: BoxFit.cover,
-                                  ),
-                                ),
-                              ),
-                              Container(
-                                color: Colors.black.withOpacity(0.3),
-                                child: const Icon(Icons.check_circle, color: Colors.white, size: 40),
-                              ),
-                              Positioned(
-                                top: 8,
-                                right: 8,
-                                child: GestureDetector(
-                                  onTap: () {
-                                    setState(() {
-                                      _photoAttached = false;
-                                      _uploadedPhotoUrl = null;
-                                    });
-                                  },
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: const BoxDecoration(
-                                      color: Colors.black54,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: const Icon(Icons.close, color: Colors.white, size: 16),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          )
-                        : Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.add_a_photo, color: Colors.grey, size: 36),
-                              SizedBox(height: 8),
-                              Text('Tap to select plant image from your device', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                            ],
-                          ),
-              ),
-            ),
-            const SizedBox(height: 30),
-            SizedBox(
-              width: double.infinity,
-              child: CustomButton(
-                text: 'Analyze Health Now',
-                onTap: _runDiagnosis,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // --- Step 4: Results Display ---
-    final primaryDiag = _diagnosisResult?['primary'];
-    final List<dynamic> alternates = _diagnosisResult?['alternates'] ?? [];
-    final double confidence = primaryDiag?['confidence'] ?? 60.0;
-    final List<dynamic> steps = primaryDiag?['steps'] ?? [];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Diagnosis Results',
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-        ),
-        const SizedBox(height: 16),
-        Container(
-          width: double.infinity,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 4))],
-          ),
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    primaryDiag?['cause'] ?? 'General Stress',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: primaryColor),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: primaryColor.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '${confidence.toStringAsFixed(0)}% Confidence',
-                      style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold, fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Recommended Treatment Steps:',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF2D3748)),
-              ),
-              const SizedBox(height: 8),
-              ...steps.map((step) => Padding(
-                    padding: const EdgeInsets.only(bottom: 6.0),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.arrow_right, color: Colors.green, size: 20),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(
-                            step.toString(),
-                            style: const TextStyle(color: Color(0xFF4A5568), fontSize: 14),
+  void _showSelectCardDialog(String diagnosis, String? photoUrl) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Select Saved Plant'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: _userCards.isEmpty
+                ? const Text('You have no saved plants in your garden. Please create a new PlantCard.')
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _userCards.length,
+                    itemBuilder: (context, index) {
+                      final card = _userCards[index];
+                      return ListTile(
+                        leading: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.network(
+                            card.photoUrl ?? 'https://images.unsplash.com/photo-1596547609652-9cf5d8d76921',
+                            width: 40,
+                            height: 40,
+                            fit: BoxFit.cover,
                           ),
                         ),
-                      ],
-                    ),
-                  )),
-            ],
+                        title: Text(card.nickname),
+                        subtitle: Text(card.species),
+                        onTap: () async {
+                          Navigator.pop(context);
+                          await _logToExistingCard(card.plantCardId, diagnosis, photoUrl);
+                        },
+                      );
+                    },
+                  ),
           ),
-        ),
-        const SizedBox(height: 16),
-        if (alternates.isNotEmpty) ...[
-          const Text(
-            'Could it be something else?',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF2D3748)),
-          ),
-          const SizedBox(height: 8),
-          ...alternates.map((alt) => Card(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                child: ListTile(
-                  title: Text(alt['cause'].toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
-                  trailing: Text('${(alt['confidence'] as num).toStringAsFixed(0)}%'),
-                ),
-              )),
-          const SizedBox(height: 20),
-        ],
-        
-        // Post-Diagnosis actions
-        SizedBox(
-          width: double.infinity,
-          child: CustomButton(
-            text: 'Save to PlantCard',
-            onTap: () async {
-              if (_isSavedPlant && _selectedCard != null) {
-                // Add log to existing card
-                try {
-                  await _apiService.addHealthLog(_selectedCard!.plantCardId, {
-                    'entry_type': 'Diagnosis',
-                    'diagnosis': primaryDiag?['cause'] ?? 'General Stress',
-                    'confidence': confidence,
-                    'photo_url': _uploadedPhotoUrl,
-                  });
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Diagnosis successfully logged to PlantCard timeline!')),
-                    );
-                    Navigator.pop(context);
-                  }
-                } catch (e) {
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Failed to save log: $e')),
-                    );
-                  }
-                }
-              } else {
-                // Prompt to create a new PlantCard
-                _showCreateCardDialog(context, primaryDiag?['cause'] ?? 'General Stress', _uploadedPhotoUrl);
-              }
-            },
-          ),
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: CustomButton(
-                text: 'Resolve',
-                isPrimary: false,
-                onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Marked as resolved!')),
-                  );
-                  Navigator.pop(context);
-                },
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: CustomButton(
-                text: 'Retake',
-                isPrimary: false,
-                onTap: _reset,
-              ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
             ),
           ],
-        ),
-      ],
+        );
+      },
     );
+  }
+
+  Future<void> _logToExistingCard(int plantCardId, String diagnosis, String? photoUrl) async {
+    setState(() => _isLoadingBotResponse = true);
+    try {
+      await _apiService.addHealthLog(plantCardId, {
+        'entry_type': 'Diagnosis',
+        'diagnosis': diagnosis,
+        'confidence': 80.0,
+        'photo_url': photoUrl,
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Diagnosis successfully logged to PlantCard timeline!')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save log: $e')),
+        );
+      }
+    } finally {
+      setState(() => _isLoadingBotResponse = false);
+    }
   }
 
   void _showCreateCardDialog(BuildContext context, String currentDiagnosis, String? photoUrl) {
@@ -616,43 +284,42 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
             TextButton(
               onPressed: () async {
                 if (nicknameController.text.isEmpty || speciesController.text.isEmpty) return;
+                Navigator.pop(context); // close dialog
+                setState(() => _isLoadingBotResponse = true);
+                
                 try {
                   final card = await _apiService.createPlantCard(1, {
                     'nickname': nicknameController.text,
                     'species': speciesController.text,
-                    'location': _location,
-                    'light_exposure': _light,
-                    'water_frequency': _waterFrequency ?? 'Weekly',
+                    'water_frequency': 'Weekly',
                     'fertilize_frequency': 'Monthly',
                     'photo_url': photoUrl,
                   });
                   
-                  // Log current diagnosis to it
                   await _apiService.addHealthLog(card.plantCardId, {
                     'entry_type': 'Diagnosis',
                     'diagnosis': currentDiagnosis,
-                    'confidence': 70.0,
+                    'confidence': 80.0,
                     'photo_url': photoUrl,
                   });
 
-                  if (context.mounted) {
-                    Navigator.pop(context); // close dialog
-                    this._reset();
-                    Navigator.push(
+                  if (mounted) {
+                    Navigator.pushReplacement(
                       context,
                       MaterialPageRoute(builder: (context) => const PlantCardsScreen()),
                     );
-                    
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Successfully created PlantCard and saved diagnosis!')),
                     );
                   }
                 } catch (e) {
-                  if (context.mounted) {
+                  if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('Failed to save PlantCard: $e')),
                     );
                   }
+                } finally {
+                  setState(() => _isLoadingBotResponse = false);
                 }
               },
               child: const Text('Save'),
@@ -660,6 +327,347 @@ class _DiagnosisScreenState extends State<DiagnosisScreen> {
           ],
         );
       },
+    );
+  }
+
+  List<TextSpan> _parseFormattedText(String text) {
+    final List<TextSpan> spans = [];
+    final RegExp regExp = RegExp(r'\*\*(.*?)\*\*');
+    int start = 0;
+    
+    for (final Match match in regExp.allMatches(text)) {
+      if (match.start > start) {
+        spans.add(TextSpan(text: text.substring(start, match.start)));
+      }
+      spans.add(TextSpan(
+        text: match.group(1),
+        style: const TextStyle(fontWeight: FontWeight.bold),
+      ));
+      start = match.end;
+    }
+    
+    if (start < text.length) {
+      spans.add(TextSpan(text: text.substring(start)));
+    }
+    
+    return spans;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final primaryColor = const Color(0xFF0F5132);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FA),
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0.5,
+        iconTheme: const IconThemeData(color: Color(0xFF2D3748)),
+        title: const Text(
+          'Plant Health Assistant',
+          style: TextStyle(color: Color(0xFF2D3748), fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: Column(
+        children: [
+          // Select Plant Card Context Header
+          Container(
+            color: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                Icon(Icons.spa_outlined, color: primaryColor),
+                const SizedBox(width: 8),
+                const Text(
+                  'Diagnosing Plant:',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF4A5568)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<PlantCard?>(
+                        value: _selectedCard,
+                        hint: const Text('General / Unsaved Plant'),
+                        items: [
+                          const DropdownMenuItem<PlantCard?>(
+                            value: null,
+                            child: Text('General / Unsaved Plant'),
+                          ),
+                          ..._userCards.map((c) => DropdownMenuItem<PlantCard?>(
+                            value: c,
+                            child: Text(c.nickname),
+                          )),
+                        ],
+                        onChanged: (val) {
+                          setState(() {
+                            _selectedCard = val;
+                          });
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          // Chat bubbles feed
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(16),
+              itemCount: _messages.length + (_isLoadingBotResponse ? 1 : 0),
+              itemBuilder: (context, index) {
+                if (index == _messages.length) {
+                  // Show typing bubble
+                  return _buildTypingBubble(primaryColor);
+                }
+                
+                final msg = _messages[index];
+                final isUser = msg['sender'] == 'user';
+                
+                return _buildMessageBubble(msg, isUser, primaryColor);
+              },
+            ),
+          ),
+          
+          // Attached image preview bar
+          if (_uploadedPhotoUrl != null) _buildAttachedPhotoPreview(),
+          
+          // Text Input and controls
+          _buildChatInputBar(primaryColor),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMessageBubble(Map<String, dynamic> msg, bool isUser, Color primaryColor) {
+    final bubbleColor = isUser ? primaryColor : Colors.white;
+    final textColor = isUser ? Colors.white : const Color(0xFF2D3748);
+    final align = isUser ? Alignment.centerRight : Alignment.centerLeft;
+    final radius = isUser 
+        ? const BorderRadius.only(topLeft: Radius.circular(18), topRight: Radius.circular(18), bottomLeft: Radius.circular(18))
+        : const BorderRadius.only(topLeft: Radius.circular(18), topRight: Radius.circular(18), bottomRight: Radius.circular(18));
+
+    return Align(
+      alignment: align,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: bubbleColor,
+          borderRadius: radius,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 6,
+              offset: const Offset(0, 3),
+            )
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (msg['photoUrl'] != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(
+                  msg['photoUrl'] as String,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => const Icon(Icons.broken_image),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            RichText(
+              text: TextSpan(
+                style: TextStyle(
+                  color: textColor,
+                  fontSize: 15,
+                  height: 1.4,
+                  fontFamily: 'Inter',
+                ),
+                children: _parseFormattedText(msg['text'] as String),
+              ),
+            ),
+            if (!isUser && msg['diagnosis'] != null) ...[
+              const Divider(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton.icon(
+                    onPressed: () => _showSaveOptionDialog(msg['diagnosis'] as String, msg['photoUrl'] as String?),
+                    icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                    label: const Text('Log to Garden'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: primaryColor,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
+              )
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTypingBubble(Color primaryColor) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(18),
+            topRight: Radius.circular(18),
+            bottomRight: Radius.circular(18),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.02),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            )
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Text(
+              'Scanning symptoms...',
+              style: TextStyle(color: Colors.grey, fontSize: 13, fontStyle: FontStyle.italic),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAttachedPhotoPreview() {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.all(12),
+      width: double.infinity,
+      child: Row(
+        children: [
+          Stack(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(
+                  _uploadedPhotoUrl!,
+                  width: 60,
+                  height: 60,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              Positioned(
+                top: 2,
+                right: 2,
+                child: GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _uploadedPhotoUrl = null;
+                    });
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      color: Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close, color: Colors.white, size: 14),
+                  ),
+                ),
+              )
+            ],
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Symptom image attached and ready to analyze.',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChatInputBar(Color primaryColor) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            // Upload button
+            _isUploadingPhoto
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : IconButton(
+                    icon: Icon(Icons.photo_camera_back_outlined, color: primaryColor),
+                    tooltip: 'Attach Symptom Photo',
+                    onPressed: _pickAndUploadPhoto,
+                  ),
+            const SizedBox(width: 8),
+            
+            // Text box
+            Expanded(
+              child: TextFormField(
+                controller: _chatInputController,
+                decoration: InputDecoration(
+                  hintText: 'Describe plant symptoms here...',
+                  fillColor: const Color(0xFFF1F5F9),
+                  filled: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(20),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+                textInputAction: TextInputAction.send,
+                onFieldSubmitted: (_) => _sendMessage(),
+              ),
+            ),
+            
+            const SizedBox(width: 8),
+            
+            // Send button
+            IconButton(
+              icon: Icon(Icons.send_rounded, color: primaryColor),
+              onPressed: _sendMessage,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
