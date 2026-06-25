@@ -1,0 +1,36 @@
+name: greennest
+description: A premium plant recommendation, shop, and health diagnostic assistant application.
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Cupertino icons for iOS-style design elements
+  cupertino_icons: ^1.0.5
+
+  # Network requests to communicate with FastAPI backend
+  http: ^1.1.0
+
+  # State management for application state, cart, and recommendations
+  provider: ^6.0.5
+
+  # Image picker to choose/take plant photos for diagnosis
+  image_picker: ^1.0.4
+
+  # Shared preferences to store user authentication and basic local state
+  shared_preferences: ^2.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.1
+
+flutter:
+  uses-material-design: true
